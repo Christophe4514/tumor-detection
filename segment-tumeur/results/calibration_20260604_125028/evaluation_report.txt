@@ -1,0 +1,10 @@
+                 glioma           meningioma       pituitary tumor  
+--------------------------------------------------------------------
+glioma           7                59               216              
+meningioma       3                110              234              
+pituitary tumor  2                80               385              
+
+Accuracy globale: 0.4580 (1096 échantillons test)
+Accuracy glioma: 0.0248
+Accuracy meningioma: 0.3170
+Accuracy pituitary tumor: 0.8244
