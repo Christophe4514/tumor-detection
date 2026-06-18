@@ -99,21 +99,24 @@ def classify_tumor_type(
 
     if calibrated_model is not None:
         feature_vector = feats.as_array()
-        proba = calibrated_model.predict_proba(feature_vector)
-        proba = _apply_path_prior(proba, image_path=image_path, boost=1.35)
-        p_sum = float(sum(proba.values())) + 1e-12
-        proba = {k: float(v / p_sum) for k, v in proba.items()}
-        predicted_label = max(proba, key=proba.get)
-        confidence = proba[predicted_label]
-        return TumorClassificationResult(
-            label=predicted_label,
-            confidence=confidence,
-            method="calibrated-fuzzy-model",
-            explanation=(
-                f"Probas calibrées: {proba} | "
-                f"features={feature_vector.round(4).tolist()}"
-            ),
-        )
+        if calibrated_model.mu.shape[1] != feature_vector.shape[0]:
+            calibrated_model = None
+        else:
+            proba = calibrated_model.predict_proba(feature_vector)
+            proba = _apply_path_prior(proba, image_path=image_path, boost=1.35)
+            p_sum = float(sum(proba.values())) + 1e-12
+            proba = {k: float(v / p_sum) for k, v in proba.items()}
+            predicted_label = max(proba, key=proba.get)
+            confidence = proba[predicted_label]
+            return TumorClassificationResult(
+                label=predicted_label,
+                confidence=confidence,
+                method="calibrated-fuzzy-model",
+                explanation=(
+                    f"Probas calibrées: {proba} | "
+                    f"features={feature_vector.round(4).tolist()}"
+                ),
+            )
 
     # Fonctions d'appartenance floues pour chaque classe.
     no_tumor_score = 0.70 * _clamp01((0.015 - feats.area_ratio) / 0.015) + 0.30 * _clamp01((0.35 - feats.intensity_norm) / 0.35)

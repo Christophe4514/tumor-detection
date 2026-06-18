@@ -36,6 +36,7 @@ def segment_with_fcm(
     epsilon: float = 1e-3,
     max_iterations: int = 100,
     random_state: int = 42,
+    use_mpi: Optional[bool] = None,
     callback: Optional[Callable[[int, float], None]] = None,
 ) -> SegmentationResult:
     """Segmente une image normalisée [0, 1] par FCM.
@@ -58,6 +59,7 @@ def segment_with_fcm(
         epsilon=epsilon,
         max_iterations=max_iterations,
         random_state=random_state,
+        use_mpi=use_mpi,
     )
     fcm_result = fcm.fit(data, callback=callback)
 
