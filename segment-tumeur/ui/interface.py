@@ -35,7 +35,7 @@ class BrainTumorFCMApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Segmentation floue IRM - Fuzzy C-Means (M2 Logique Floue)")
+        self.root.title("Détection automatique des tumeurs cérébrales - FCM + OpenMPI")
         self.root.geometry("1400x900")
         self.root.minsize(1200, 760)
 
@@ -63,7 +63,7 @@ class BrainTumorFCMApp:
 
         title = ttk.Label(
             container,
-            text="Détection de tumeur cérébrale par segmentation floue (FCM)",
+            text="Détection automatique des tumeurs cérébrales sur IRM (FCM + OpenMPI)",
             style="Title.TLabel",
         )
         title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
@@ -127,6 +127,10 @@ class BrainTumorFCMApp:
             "time": ttk.Label(metrics_card, text="Temps (s): -", style="Metric.TLabel"),
             "objective": ttk.Label(metrics_card, text="Jm final: -", style="Metric.TLabel"),
             "convergence": ttk.Label(metrics_card, text="Convergence: -", style="Metric.TLabel"),
+            "backend": ttk.Label(metrics_card, text="Backend FCM: -", style="Metric.TLabel"),
+            "calib_acc": ttk.Label(metrics_card, text="Calibration Accuracy: -", style="Metric.TLabel"),
+            "calib_f1": ttk.Label(metrics_card, text="Calibration F1 (macro): -", style="Metric.TLabel"),
+            "calib_backend": ttk.Label(metrics_card, text="Calibration backend: -", style="Metric.TLabel"),
             "tumor_cluster": ttk.Label(metrics_card, text="Cluster tumoral: -", style="Metric.TLabel"),
             "tumor_type": ttk.Label(metrics_card, text="Type prédit: -", style="Metric.TLabel"),
             "calibration": ttk.Label(metrics_card, text="Calibration: non chargée", style="Metric.TLabel"),
@@ -157,6 +161,11 @@ class BrainTumorFCMApp:
         ttk.Label(parent, text="max_iterations:").grid(row=row, column=0, sticky="w", pady=3)
         self.max_iter_var = tk.IntVar(value=100)
         ttk.Entry(parent, textvariable=self.max_iter_var).grid(row=row, column=1, sticky="ew")
+        row += 1
+
+        ttk.Label(parent, text="Calibration - max samples:").grid(row=row, column=0, sticky="w", pady=3)
+        self.calibration_max_samples_var = tk.IntVar(value=120)
+        ttk.Entry(parent, textvariable=self.calibration_max_samples_var).grid(row=row, column=1, sticky="ew")
         row += 1
 
         ttk.Separator(parent).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
@@ -246,6 +255,10 @@ class BrainTumorFCMApp:
         self.metrics_labels["time"].configure(text="Temps (s): -")
         self.metrics_labels["objective"].configure(text="Jm final: -")
         self.metrics_labels["convergence"].configure(text="Convergence: -")
+        self.metrics_labels["backend"].configure(text="Backend FCM: -")
+        self.metrics_labels["calib_acc"].configure(text="Calibration Accuracy: -")
+        self.metrics_labels["calib_f1"].configure(text="Calibration F1 (macro): -")
+        self.metrics_labels["calib_backend"].configure(text="Calibration backend: -")
         self.metrics_labels["tumor_cluster"].configure(text="Cluster tumoral: -")
         self.metrics_labels["tumor_type"].configure(text="Type prédit: -")
         self.metrics_labels["calibration"].configure(
@@ -308,6 +321,13 @@ class BrainTumorFCMApp:
         self.metrics_labels["time"].configure(text=f"Temps (s): {self.metrics.execution_time_sec:.4f}")
         self.metrics_labels["objective"].configure(text=f"Jm final: {self.metrics.final_objective_value:.6f}")
         self.metrics_labels["convergence"].configure(text=f"Convergence: {'Oui' if self.metrics.converged else 'Non'}")
+        if self.segmentation_result is not None:
+            fcm_meta = self.segmentation_result.fcm_result
+            if fcm_meta.mpi_enabled:
+                backend = f"OpenMPI ({fcm_meta.mpi_size} processus)"
+            else:
+                backend = "NumPy mono-processus"
+            self.metrics_labels["backend"].configure(text=f"Backend FCM: {backend}")
 
     def load_images(self) -> None:
         """Charge une ou plusieurs IRM (PNG/JPG/JPEG)."""
@@ -407,6 +427,7 @@ class BrainTumorFCMApp:
                 epsilon=epsilon,
                 max_iterations=max_iterations,
                 random_state=42,
+                use_mpi=None,
                 callback=per_iteration_callback,
             )
 
@@ -511,7 +532,7 @@ class BrainTumorFCMApp:
                 max_iterations=min(self.max_iter_var.get(), 80),
                 test_ratio=0.25,
                 random_state=42,
-                max_samples=None,
+                max_samples=max(20, int(self.calibration_max_samples_var.get())),
                 progress_callback=progress_callback,
             )
 
@@ -519,6 +540,18 @@ class BrainTumorFCMApp:
             self.metrics_labels["calibration"].configure(
                 text=f"Calibration: acc={result.report.accuracy:.3f} (test={result.n_test})"
             )
+            self.metrics_labels["calib_acc"].configure(
+                text=f"Calibration Accuracy: {result.report.accuracy:.3f}"
+            )
+            self.metrics_labels["calib_f1"].configure(
+                text=f"Calibration F1 (macro): {result.report.macro_f1:.3f}"
+            )
+            calib_backend = (
+                f"OpenMPI ({result.mpi_max_processes} processus)"
+                if result.mpi_parallel_images > 0
+                else "NumPy mono-processus"
+            )
+            self.metrics_labels["calib_backend"].configure(text=f"Calibration backend: {calib_backend}")
 
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             output_dir = ensure_directory(Path("results") / f"calibration_{timestamp}")
@@ -530,6 +563,13 @@ class BrainTumorFCMApp:
             report_path.write_text(report_text, encoding="utf-8")
 
             self._append_log(report_text)
+            self._append_log(
+                (
+                    f"Temps calibration: {result.calibration_time_sec:.2f}s | "
+                    f"Backend: {calib_backend} | "
+                    f"Images traitées en parallèle: {result.mpi_parallel_images}/{result.n_total}"
+                )
+            )
             self._set_status(f"Calibration terminée. Accuracy test={result.report.accuracy:.3f}")
             self._set_progress(100)
             if show_dialogs:
@@ -537,7 +577,12 @@ class BrainTumorFCMApp:
                     "Calibration terminée",
                     (
                         f"Accuracy test: {result.report.accuracy:.4f}\n"
+                        f"Macro F1-score: {result.report.macro_f1:.4f}\n"
+                        f"Weighted F1-score: {result.report.weighted_f1:.4f}\n"
                         f"Train/Test: {result.n_train}/{result.n_test}\n"
+                        f"Temps calibration: {result.calibration_time_sec:.2f}s\n"
+                        f"Backend: {calib_backend}\n"
+                        f"Images en mode parallèle: {result.mpi_parallel_images}/{result.n_total}\n"
                         f"Images ignorées: {result.skipped_files}\n\n"
                         f"Modèle: {model_path}\n"
                         f"Modèle courant: {self.DEFAULT_MODEL_PATH}\n"
@@ -658,6 +703,10 @@ class BrainTumorFCMApp:
         self.metrics_labels["time"].configure(text="Temps (s): -")
         self.metrics_labels["objective"].configure(text="Jm final: -")
         self.metrics_labels["convergence"].configure(text="Convergence: -")
+        self.metrics_labels["backend"].configure(text="Backend FCM: -")
+        self.metrics_labels["calib_acc"].configure(text="Calibration Accuracy: -")
+        self.metrics_labels["calib_f1"].configure(text="Calibration F1 (macro): -")
+        self.metrics_labels["calib_backend"].configure(text="Calibration backend: -")
         self.metrics_labels["tumor_cluster"].configure(text="Cluster tumoral: -")
         self.metrics_labels["tumor_type"].configure(text="Type prédit: -")
         self.metrics_labels["calibration"].configure(
