@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+import time
+from collections import defaultdict
 
 import numpy as np
 
@@ -19,7 +21,18 @@ from utils.image_utils import load_image_bgr
 
 ALLOWED_EXT = {".png", ".jpg", ".jpeg"}
 VALID_LABELS = {"no tumor", "glioma", "meningioma", "pituitary tumor"}
-FEATURE_NAMES = ["area_ratio", "edge_distance", "circularity", "irregularity", "intensity_norm"]
+FEATURE_NAMES = [
+    "area_ratio",
+    "edge_distance",
+    "circularity",
+    "irregularity",
+    "intensity_norm",
+    "bbox_fill_ratio",
+    "intensity_std_norm",
+    "intensity_p90_norm",
+    "centroid_x_norm",
+    "centroid_y_norm",
+]
 
 
 @dataclass
@@ -32,6 +45,9 @@ class CalibrationEvaluationResult:
     n_train: int
     n_test: int
     skipped_files: int
+    calibration_time_sec: float
+    mpi_parallel_images: int
+    mpi_max_processes: int
 
 
 def _infer_label_from_path(path: Path) -> str | None:
@@ -47,7 +63,7 @@ def _infer_label_from_path(path: Path) -> str | None:
     return None
 
 
-def _collect_images(dataset_dir: Path, max_samples: int | None = None) -> list[tuple[Path, str]]:
+def _collect_images(dataset_dir: Path) -> list[tuple[Path, str]]:
     samples: list[tuple[Path, str]] = []
     for path in dataset_dir.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in ALLOWED_EXT:
@@ -55,9 +71,45 @@ def _collect_images(dataset_dir: Path, max_samples: int | None = None) -> list[t
         label = _infer_label_from_path(path)
         if label in VALID_LABELS:
             samples.append((path, label))
-        if max_samples is not None and len(samples) >= max_samples:
-            break
     return samples
+
+
+def _stratified_sample(
+    samples: list[tuple[Path, str]],
+    max_samples: int | None,
+    random_state: int,
+) -> list[tuple[Path, str]]:
+    """Sous-échantillonne de manière stratifiée pour garder plusieurs classes."""
+    if max_samples is None or max_samples <= 0 or len(samples) <= max_samples:
+        return samples
+
+    rng = np.random.default_rng(random_state)
+    by_label: dict[str, list[tuple[Path, str]]] = defaultdict(list)
+    for item in samples:
+        by_label[item[1]].append(item)
+
+    label_keys = sorted(by_label.keys())
+    for label in label_keys:
+        arr = by_label[label]
+        if len(arr) > 1:
+            order = rng.permutation(len(arr))
+            by_label[label] = [arr[i] for i in order]
+
+    selected: list[tuple[Path, str]] = []
+    per_label_idx = {label: 0 for label in label_keys}
+    while len(selected) < max_samples:
+        added = False
+        for label in label_keys:
+            idx = per_label_idx[label]
+            if idx < len(by_label[label]):
+                selected.append(by_label[label][idx])
+                per_label_idx[label] += 1
+                added = True
+                if len(selected) >= max_samples:
+                    break
+        if not added:
+            break
+    return selected
 
 
 def run_calibration_and_evaluation(
@@ -72,11 +124,13 @@ def run_calibration_and_evaluation(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> CalibrationEvaluationResult:
     """Exécute la calibration supervisée puis l'évaluation."""
+    start_time = time.perf_counter()
     ds = Path(dataset_dir)
     if not ds.exists():
         raise ValueError(f"Dossier dataset introuvable: {ds}")
 
-    samples = _collect_images(ds, max_samples=max_samples)
+    samples = _collect_images(ds)
+    samples = _stratified_sample(samples, max_samples=max_samples, random_state=random_state)
     if len(samples) < 20:
         raise ValueError("Dataset insuffisant: au moins 20 images annotées sont nécessaires.")
 
@@ -89,6 +143,8 @@ def run_calibration_and_evaluation(
     labels: list[str] = []
     skipped = 0
     total = len(samples)
+    mpi_parallel_images = 0
+    mpi_max_processes = 1
 
     for idx, (img_path, label) in enumerate(samples, start=1):
         if progress_callback is not None:
@@ -103,8 +159,12 @@ def run_calibration_and_evaluation(
                 epsilon=epsilon,
                 max_iterations=max_iterations,
                 random_state=random_state,
+                use_mpi=None,
                 callback=None,
             )
+            if seg.fcm_result.mpi_enabled:
+                mpi_parallel_images += 1
+            mpi_max_processes = max(mpi_max_processes, int(seg.fcm_result.mpi_size))
             det = detect_tumor_from_segmentation(
                 segmentation_result=seg,
                 preprocessed_gray_uint8=pre.median_filtered,
@@ -122,6 +182,15 @@ def run_calibration_and_evaluation(
 
     X = np.vstack(features)
     y = labels
+    class_counts: dict[str, int] = {}
+    for label in sorted(set(y)):
+        class_counts[label] = sum(1 for v in y if v == label)
+    if len(class_counts) < 2:
+        raise ValueError(
+            "Le dataset exploitable après segmentation contient moins de 2 classes. "
+            f"Distribution trouvée: {class_counts}. "
+            "Augmentez 'Calibration - max samples' ou vérifiez la qualité des images."
+        )
     n_total = X.shape[0]
     n_test = max(1, int(round(n_total * test_ratio)))
     n_train = n_total - n_test
@@ -138,6 +207,7 @@ def run_calibration_and_evaluation(
         y_pred.append(pred)
 
     report = compute_evaluation_report(y_test, y_pred, labels=sorted(set(y_train) | set(y_test)))
+    calibration_time_sec = float(time.perf_counter() - start_time)
     return CalibrationEvaluationResult(
         model=model,
         report=report,
@@ -145,4 +215,7 @@ def run_calibration_and_evaluation(
         n_train=n_train,
         n_test=n_test,
         skipped_files=skipped,
+        calibration_time_sec=calibration_time_sec,
+        mpi_parallel_images=mpi_parallel_images,
+        mpi_max_processes=mpi_max_processes,
     )
