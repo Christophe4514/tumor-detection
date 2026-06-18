@@ -2,3 +2,5 @@ numpy
 opencv-python
 Pillow
 kagglehub
+# Optionnel pour l'exécution parallèle OpenMPI:
+# mpi4py

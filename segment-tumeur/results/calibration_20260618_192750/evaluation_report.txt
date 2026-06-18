@@ -1,0 +1,18 @@
+                 glioma           meningioma       pituitary tumor  
+--------------------------------------------------------------------
+glioma           1                2                4                
+meningioma       0                2                10               
+pituitary tumor  1                5                5                
+
+Accuracy globale: 0.2667 (30 échantillons test)
+Macro Precision: 0.3285
+Macro Recall: 0.2547
+Macro F1-score: 0.2487
+Weighted F1-score: 0.2503
+
+Accuracy glioma: 0.1429
+  Precision=0.5000 Recall=0.1429 F1=0.2222
+Accuracy meningioma: 0.1667
+  Precision=0.2222 Recall=0.1667 F1=0.1905
+Accuracy pituitary tumor: 0.4545
+  Precision=0.2632 Recall=0.4545 F1=0.3333
