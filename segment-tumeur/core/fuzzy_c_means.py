@@ -22,9 +22,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
+import os
 import time
 
 import numpy as np
+
+try:
+    from mpi4py import MPI  # pyright: ignore[reportMissingImports]
+except Exception:  # pragma: no cover - dépend de l'environnement MPI local.
+    MPI = None
 
 
 @dataclass
@@ -37,6 +43,9 @@ class FCMResult:
     n_iterations: int
     elapsed_time_sec: float
     converged: bool
+    mpi_enabled: bool
+    mpi_rank: int
+    mpi_size: int
 
 
 class FuzzyCMeans:
@@ -49,6 +58,7 @@ class FuzzyCMeans:
         epsilon: float = 1e-3,
         max_iterations: int = 100,
         random_state: Optional[int] = 42,
+        use_mpi: Optional[bool] = None,
     ) -> None:
         if n_clusters < 2:
             raise ValueError("Le nombre de clusters doit être >= 2.")
@@ -64,6 +74,31 @@ class FuzzyCMeans:
         self.epsilon = epsilon
         self.max_iterations = max_iterations
         self.random_state = random_state
+        self.use_mpi = use_mpi
+
+    @staticmethod
+    def _resolve_mpi_mode(use_mpi: Optional[bool]) -> tuple[bool, int, int, object]:
+        """Détermine si l'exécution MPI est activée."""
+        if MPI is None:
+            return False, 0, 1, None
+
+        env_value = os.getenv("FCM_USE_MPI", "").strip().lower()
+        env_requested = env_value in {"1", "true", "yes", "on"}
+        requested = env_requested if use_mpi is None else use_mpi
+        comm = MPI.COMM_WORLD
+        size = int(comm.Get_size())
+        rank = int(comm.Get_rank())
+        enabled = bool(requested and size > 1)
+        return enabled, rank, size, comm
+
+    @staticmethod
+    def _split_range(n_samples: int, rank: int, size: int) -> tuple[int, int]:
+        """Découpe [0, n_samples) en blocs contigus équilibrés par rang MPI."""
+        base = n_samples // size
+        extra = n_samples % size
+        start = rank * base + min(rank, extra)
+        length = base + (1 if rank < extra else 0)
+        return start, start + length
 
     def _initialize_membership(self, n_samples: int) -> np.ndarray:
         """Initialise U aléatoirement puis normalise chaque ligne à 1."""
@@ -141,24 +176,51 @@ class FuzzyCMeans:
             raise ValueError("data doit être de forme (n_samples, n_features).")
 
         n_samples = data.shape[0]
-        membership = self._initialize_membership(n_samples)
+        mpi_enabled, mpi_rank, mpi_size, mpi_comm = self._resolve_mpi_mode(self.use_mpi)
+
+        if mpi_enabled:
+            start_idx, end_idx = self._split_range(n_samples, mpi_rank, mpi_size)
+            local_data = data[start_idx:end_idx]
+            membership = self._initialize_membership(local_data.shape[0])
+        else:
+            local_data = data
+            membership = self._initialize_membership(n_samples)
+
         objective_history: list[float] = []
         converged = False
         start_time = time.perf_counter()
 
         for iteration in range(1, self.max_iterations + 1):
-            centers = self._update_centers(data, membership)
-            distances_sq = self._euclidean_distances_squared(data, centers)
+            if mpi_enabled:
+                um = membership ** self.m
+                local_numerator = um.T @ local_data
+                local_denominator = np.sum(um, axis=0)[:, np.newaxis]
+                numerator = mpi_comm.allreduce(local_numerator, op=MPI.SUM)
+                denominator = mpi_comm.allreduce(local_denominator, op=MPI.SUM)
+                denominator = np.clip(denominator, 1e-12, None)
+                centers = numerator / denominator
+            else:
+                centers = self._update_centers(local_data, membership)
+
+            distances_sq = self._euclidean_distances_squared(local_data, centers)
             membership_new = self._update_membership(distances_sq)
-            objective_value = self._objective_function(membership_new, distances_sq)
+            objective_local = self._objective_function(membership_new, distances_sq)
+            if mpi_enabled:
+                objective_value = float(mpi_comm.allreduce(objective_local, op=MPI.SUM))
+            else:
+                objective_value = objective_local
             objective_history.append(objective_value)
 
-            if callback is not None:
+            if callback is not None and (not mpi_enabled or mpi_rank == 0):
                 callback(iteration, objective_value)
 
             # Critère de convergence:
             # ||U^(t+1) - U^(t)|| < epsilon
-            delta_u = np.linalg.norm(membership_new - membership)
+            delta_u_local = float(np.sum((membership_new - membership) ** 2))
+            if mpi_enabled:
+                delta_u = float(np.sqrt(mpi_comm.allreduce(delta_u_local, op=MPI.SUM)))
+            else:
+                delta_u = float(np.sqrt(delta_u_local))
             membership = membership_new
 
             if delta_u < self.epsilon:
@@ -166,11 +228,21 @@ class FuzzyCMeans:
                 break
 
         elapsed = time.perf_counter() - start_time
+        if mpi_enabled:
+            elapsed = float(mpi_comm.allreduce(elapsed, op=MPI.MAX))
+            gathered_membership = mpi_comm.allgather(membership)
+            membership_full = np.vstack(gathered_membership) if gathered_membership else membership
+        else:
+            membership_full = membership
+
         return FCMResult(
-            membership=membership,
+            membership=membership_full,
             centers=centers,
             objective_history=objective_history,
             n_iterations=len(objective_history),
             elapsed_time_sec=elapsed,
             converged=converged,
+            mpi_enabled=mpi_enabled,
+            mpi_rank=mpi_rank,
+            mpi_size=mpi_size,
         )
