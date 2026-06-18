@@ -1,14 +1,15 @@
-# Segmentation floue d'IRM cérébrales par Fuzzy C-Means (FCM)
+# Détection automatique des tumeurs cérébrales sur IRM par Fuzzy C-Means (FCM) parallélisé avec OpenMPI
 
 Projet académique de **Master 2 - Logique Floue**:
 
-> **Segmentation floue d'images médicales par l'algorithme Fuzzy C-Means : Application à la détection de tumeurs cérébrales**
+> **Détection automatique des tumeurs cérébrales sur images IRM par l'algorithme Fuzzy C-Means parallélisé avec OpenMPI**
 
 Ce projet implémente **manuellement** l'algorithme **Fuzzy C-Means (FCM)** en respectant les contraintes suivantes:
 - Pas de bibliothèque FCM prête à l'emploi.
 - Calculs matriciels avec **NumPy**.
 - Traitement d'image avec **OpenCV**.
 - Interface graphique avec **Tkinter**.
+- Exécution **OpenMPI** optionnelle (via `mpi4py`) avec repli automatique en mono-processus.
 
 ---
 
@@ -171,6 +172,23 @@ Depuis la racine du projet:
 
 ```bash
 python main.py
+```
+
+### Activer le backend OpenMPI (optionnel)
+
+Le code fonctionne en mono-processus par défaut.  
+Pour lancer le calcul FCM en mode parallèle OpenMPI:
+
+```bash
+set FCM_USE_MPI=1
+mpiexec -n 4 python main.py
+```
+
+Sous Linux/Mac:
+
+```bash
+export FCM_USE_MPI=1
+mpiexec -n 4 python main.py
 ```
 
 Workflow recommandé dans l'interface:
